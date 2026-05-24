@@ -139,18 +139,20 @@ def generar_escenario():
 # ==============================================================
 
 def optimizar_ventana_2h(precios_v, pv_v, demanda_v, soc_ini,
-                          p_dg_prev=None):
+                          p_dg_prev=None,
+                          es_ultima_ventana=False, soc0_dia=None):
     """
     Resuelve el problema MILP para una ventana de 2 horas.
 
     Parámetros
     ----------
-    precios_v  : array (2,) - precios de las 2 horas de la ventana
-    pv_v       : array (2,) - generación PV de las 2 horas
-    demanda_v  : array (2,) - demanda de las 2 horas
-    soc_ini    : float      - SOC al inicio de la ventana (p.u.)
-    p_dg_prev  : float      - potencia DG hora anterior (para rampa)
-                              None si es la primera ventana del día
+    precios_v         : array (2,) - precios de las 2 horas
+    pv_v              : array (2,) - generación PV de las 2 horas
+    demanda_v         : array (2,) - demanda de las 2 horas
+    soc_ini           : float      - SOC al inicio de la ventana
+    p_dg_prev         : float      - potencia DG hora anterior
+    es_ultima_ventana : bool        - True si es la ventana [22,23]
+    soc0_dia          : float       - SOC inicial del día (neutralidad)
 
     Retorna
     -------
@@ -172,15 +174,24 @@ def optimizar_ventana_2h(precios_v, pv_v, demanda_v, soc_ini,
     model.u_ch        = Var(model.T, within=Binary)
     model.u_dis       = Var(model.T, within=Binary)
 
-    # Función objetivo: coste total de las 2 horas de la ventana
+    # Función objetivo: coste total de las 2 horas de la ventana.
+    # En la última ventana se añade penalización blanda de neutralidad.
+    P_NEU = 500.0
+
+    if es_ultima_ventana and soc0_dia is not None:
+        model.s_neg = Var(bounds=(0, None))
+
     def objective_rule(m):
-        return sum(
+        coste = sum(
               precios_v[t] * m.P_grid_buy[t]  * DELTA_T
             - FACTOR_VENTA * precios_v[t] * m.P_grid_sell[t] * DELTA_T
             + C_DG_B * m.P_dg[t] * DELTA_T
             + C_DEG  * (m.P_ch[t] + m.P_dis[t]) * DELTA_T
             for t in m.T
         )
+        if es_ultima_ventana and soc0_dia is not None:
+            coste += P_NEU * m.s_neg
+        return coste
 
     model.obj = Objective(rule=objective_rule, sense=minimize)
 
@@ -227,11 +238,20 @@ def optimizar_ventana_2h(precios_v, pv_v, demanda_v, soc_ini,
         model.P_dg[0] - model.P_dg[1] <= DG_RAMP
     )
 
-    solver    = SolverFactory('highs')
-    resultado = solver.solve(model, tee=False)
+    # Neutralidad energética diaria (blanda): solo en la última ventana.
+    # s_neg captura el déficit SOC_fin(hora 1) - soc0_dia.
+    if es_ultima_ventana and soc0_dia is not None:
+        model.constraints.add(
+            model.s_neg >= soc0_dia - model.SOC[1]
+        )
 
-    if (resultado.solver.termination_condition
-            != TerminationCondition.optimal):
+    solver = SolverFactory('highs')
+    try:
+        resultado = solver.solve(model, tee=False)
+        if (resultado.solver.termination_condition
+                != TerminationCondition.optimal):
+            return None
+    except Exception:
         return None
 
     # Solo devolvemos la PRIMERA hora (hora 0 de la ventana)
@@ -300,11 +320,13 @@ for d in range(DIAS):
         h_fin = i + T_VEN         # h_fin = i+2 (exclusivo)
 
         res = optimizar_ventana_2h(
-            precios_v = precios[h_ini:h_fin],
-            pv_v      = pv[h_ini:h_fin],
-            demanda_v = demanda[h_ini:h_fin],
-            soc_ini   = soc_actual,
-            p_dg_prev = p_dg_prev
+            precios_v         = precios[h_ini:h_fin],
+            pv_v              = pv[h_ini:h_fin],
+            demanda_v         = demanda[h_ini:h_fin],
+            soc_ini           = soc_actual,
+            p_dg_prev         = p_dg_prev,
+            es_ultima_ventana = (i == N_VENTANAS - 1),
+            soc0_dia          = soc0
         )
 
         if res is None:

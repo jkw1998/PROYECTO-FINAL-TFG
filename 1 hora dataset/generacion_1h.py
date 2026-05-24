@@ -30,6 +30,14 @@
 # La solución de cada ventana (p_bat, SOC) se concatena para
 # reconstruir el perfil completo del día (24 valores).
 #
+# NEUTRALIDAD ENERGÉTICA DIARIA:
+# La restricción SOC_fin(día) >= SOC_0 se aplica SOLO en la
+# última hora (h=23), no en cada hora individual. Esto permite
+# que la batería cargue y descargue libremente durante el día,
+# garantizando únicamente que al final no quede más descargada
+# que al principio. Sin esta corrección, la restricción hora a
+# hora impediría cualquier descarga (dataset trivial con P_bat=0).
+#
 # Comparación con T=24h:
 # -----------------------
 # T=24h optimiza el día completo de golpe → máxima anticipación.
@@ -143,19 +151,20 @@ def generar_escenario():
 # ==============================================================
 
 def optimizar_ventana_1h(precio_h, pv_h, demanda_h, soc_ini,
-                          p_dg_prev=None):
+                          p_dg_prev=None,
+                          es_ultima_hora=False, soc0_dia=None):
     """
     Resuelve el problema MILP para UNA sola hora.
 
     Parámetros
     ----------
-    precio_h  : float  - precio del mercado en esa hora (€/MWh)
-    pv_h      : float  - generación fotovoltaica en esa hora (MW)
-    demanda_h : float  - demanda eléctrica en esa hora (MW)
-    soc_ini   : float  - SOC inicial de esta hora (p.u.)
-                         = SOC final de la hora anterior
-    p_dg_prev : float  - potencia DG hora anterior (MW) para rampa
-                         None si es la primera hora del día
+    precio_h       : float - precio del mercado en esa hora (€/MWh)
+    pv_h           : float - generación fotovoltaica en esa hora (MW)
+    demanda_h      : float - demanda eléctrica en esa hora (MW)
+    soc_ini        : float - SOC inicial de esta hora (p.u.)
+    p_dg_prev      : float - potencia DG hora anterior (MW) para rampa
+    es_ultima_hora : bool  - True si es la hora 23 del día
+    soc0_dia       : float - SOC inicial del día (para neutralidad)
 
     Retorna
     -------
@@ -178,15 +187,32 @@ def optimizar_ventana_1h(precio_h, pv_h, demanda_h, soc_ini,
     model.u_ch  = Var(model.T, within=Binary)
     model.u_dis = Var(model.T, within=Binary)
 
-    # Función objetivo: minimizar coste de esta hora
+    # Función objetivo: minimizar coste de esta hora.
+    # En la última hora del día se añade una penalización blanda
+    # que incentiva devolver el SOC a su valor inicial del día.
+    # Se usa una variable auxiliar s_neg >= 0 que captura el
+    # déficit SOC_fin - soc0_dia cuando es negativo:
+    #   s_neg >= soc0_dia - SOC[0]   (s_neg = max(0, soc0-SOC_fin))
+    # La penalización es P_NEU * s_neg con coeficiente alto para
+    # que el optimizador prefiera cargar antes de terminar el día.
+    # Esto evita la infactibilidad de la restricción dura cuando
+    # el SOC encadenado llega bajo a la hora 23.
+    P_NEU = 500.0   # €/p.u. — penalización por déficit de neutralidad
+
+    if es_ultima_hora and soc0_dia is not None:
+        model.s_neg = Var(bounds=(0, None))   # déficit SOC >= 0
+
     def objective_rule(m):
         t = 0
-        return (
+        coste = (
               precio_h * m.P_grid_buy[t]  * DELTA_T
             - FACTOR_VENTA * precio_h * m.P_grid_sell[t] * DELTA_T
             + C_DG_B * m.P_dg[t] * DELTA_T
             + C_DEG  * (m.P_ch[t] + m.P_dis[t]) * DELTA_T
         )
+        if es_ultima_hora and soc0_dia is not None:
+            coste += P_NEU * m.s_neg
+        return coste
 
     model.obj = Objective(rule=objective_rule, sense=minimize)
 
@@ -224,12 +250,25 @@ def optimizar_ventana_1h(precio_h, pv_h, demanda_h, soc_ini,
             p_dg_prev - model.P_dg[t] <= DG_RAMP
         )
 
-    # Resolución con HiGHS
-    solver    = SolverFactory('highs')
-    resultado = solver.solve(model, tee=False)
+    # Neutralidad energética diaria (blanda): solo en la última hora.
+    # s_neg >= soc0_dia - SOC[0]  →  s_neg captura el déficit de SOC.
+    # La penalización en la función objetivo incentiva s_neg = 0,
+    # es decir, que SOC_fin >= soc0_dia, sin causar infactibilidad.
+    if es_ultima_hora and soc0_dia is not None:
+        model.constraints.add(
+            model.s_neg >= soc0_dia - model.SOC[0]
+        )
 
-    if (resultado.solver.termination_condition
-            != TerminationCondition.optimal):
+    # Resolución con HiGHS
+    solver = SolverFactory('highs')
+    try:
+        resultado = solver.solve(model, tee=False)
+        if (resultado.solver.termination_condition
+                != TerminationCondition.optimal):
+            return None
+    except Exception:
+        # Versiones nuevas de Pyomo lanzan excepción en lugar de
+        # devolver un status de infactibilidad
         return None
 
     return {
@@ -276,11 +315,13 @@ for d in range(DIAS):
     for h in range(T_DIA):
 
         res = optimizar_ventana_1h(
-            precio_h  = precios[h],
-            pv_h      = pv[h],
-            demanda_h = demanda[h],
-            soc_ini   = soc_actual,
-            p_dg_prev = p_dg_prev
+            precio_h       = precios[h],
+            pv_h           = pv[h],
+            demanda_h      = demanda[h],
+            soc_ini        = soc_actual,
+            p_dg_prev      = p_dg_prev,
+            es_ultima_hora = (h == T_DIA - 1),
+            soc0_dia       = soc0
         )
 
         if res is None:
