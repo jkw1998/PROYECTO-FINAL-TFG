@@ -199,6 +199,82 @@ print(f"  {'MAX ERROR':<18} {err_acc.abs().max():>10.4f}"
       f"  {err_soc.abs().max():>10.4f}")
 print("="*52)
 
+ 
+# --- Parámetros físicos del sistema (mismos que el optimizador) ---
+P_BAT_RANGO = 0.80   # P_dis_max + P_ch_max = 0.50 + 0.30 MW
+SOC_RANGO   = 0.70   # SOC_max - SOC_min = 0.90 - 0.20 p.u.
+UMBRAL_MAPE = 0.01   # ignorar horas con |P_bat_real| < 1 kW (≈0)
+ 
+# --- Errores base (ya calculados antes de este bloque) ---
+# err_acc = df_res["ACCION_REAL"] - df_res["ACCION_IA"]
+# err_soc = df_res["SOC_REAL"]    - df_res["SOC_IA"]
+ 
+# --- nMAE normalizado por rango físico ---
+# Independiente de la escala, siempre válido aunque P_bat = 0
+# Interpretación: % del rango físico máximo de la variable
+nMAE_acc = err_acc.abs().mean() / P_BAT_RANGO * 100
+nMAE_soc = err_soc.abs().mean() / SOC_RANGO   * 100
+ 
+nRMSE_acc = np.sqrt((err_acc**2).mean()) / P_BAT_RANGO * 100
+nRMSE_soc = np.sqrt((err_soc**2).mean()) / SOC_RANGO   * 100
+ 
+# --- MAPE clásico (filtrado: solo horas donde batería se mueve) ---
+# Se excluyen las horas con |P_bat_real| < umbral para evitar
+# divisiones por cero que distorsionan el resultado
+mask_acc = df_res["ACCION_REAL"].abs() > UMBRAL_MAPE
+mask_soc = df_res["SOC_REAL"].abs()    > UMBRAL_MAPE
+ 
+n_validos_acc = mask_acc.sum()
+n_validos_soc = mask_soc.sum()
+n_total       = len(df_res)
+ 
+if n_validos_acc > 0:
+    mape_acc = (
+        (df_res.loc[mask_acc, "ACCION_REAL"] -
+         df_res.loc[mask_acc, "ACCION_IA"]).abs()
+        / df_res.loc[mask_acc, "ACCION_REAL"].abs()
+    ).mean() * 100
+else:
+    mape_acc = float('nan')
+ 
+if n_validos_soc > 0:
+    mape_soc = (
+        (df_res.loc[mask_soc, "SOC_REAL"] -
+         df_res.loc[mask_soc, "SOC_IA"]).abs()
+        / df_res.loc[mask_soc, "SOC_REAL"].abs()
+    ).mean() * 100
+else:
+    mape_soc = float('nan')
+ 
+# --- Imprimir resultados ---
+print("\n" + "="*58)
+print("  ERROR PORCENTUAL")
+print("="*58)
+print(f"  {'Metrica':<28} {'Accion(MW)':>10}  {'SOC':>10}")
+print("-"*58)
+print(f"  {'nMAE  (% rango fisico)':<28} "
+      f"{nMAE_acc:>9.2f}%  {nMAE_soc:>9.2f}%")
+print(f"  {'nRMSE (% rango fisico)':<28} "
+      f"{nRMSE_acc:>9.2f}%  {nRMSE_soc:>9.2f}%")
+print("-"*58)
+print(f"  {'MAPE clasico (filtrado)':<28} "
+      f"{mape_acc:>9.2f}%  {mape_soc:>9.2f}%")
+print(f"  {'  horas validas / total':<28} "
+      f"{n_validos_acc:>7}/{n_total}   "
+      f"{n_validos_soc:>7}/{n_total}")
+print("="*58)
+print()
+print("  Interpretacion:")
+print(f"  - nMAE P_bat: el error medio es {nMAE_acc:.1f}% del rango")
+print(f"    fisico de la bateria ({P_BAT_RANGO} MW).")
+print(f"  - nMAE SOC  : el error medio es {nMAE_soc:.1f}% del rango")
+print(f"    operativo del SOC ({SOC_RANGO} p.u.).")
+if not np.isnan(mape_acc):
+    print(f"  - MAPE P_bat: {mape_acc:.1f}% de error relativo en las horas")
+    print(f"    donde la bateria se mueve (|P_bat| > {UMBRAL_MAPE} MW).")
+print("="*58)
+ 
+
 # =============================================================
 # GRAFICAS
 # =============================================================
