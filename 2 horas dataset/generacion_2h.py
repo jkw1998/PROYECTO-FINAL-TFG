@@ -1,6 +1,6 @@
 # ==============================================================
 # TFG - GENERACIÓN DE DATASET MEDIANTE OPTIMIZACIÓN MPC/MILP
-# HORIZONTE TEMPORAL: T = 1 hora
+# HORIZONTE TEMPORAL: T = 2 horas (ventana deslizante)
 # ==============================================================
 #
 # Autor: James Kagunda Wangari
@@ -9,40 +9,41 @@
 # Descripción:
 # ------------
 # Genera el dataset de 1000 escenarios diarios resolviendo
-# 24 problemas MILP INDEPENDIENTES de 1 hora cada uno.
+# 23 problemas MILP de 2 horas con ventana deslizante de 1h.
 #
-# Estrategia de horizonte T=1h:
-# ------------------------------
-# Cada hora del día se optimiza de forma independiente, con
-# información únicamente de esa hora. No hay anticipación.
-# El SOC final de la hora h se pasa como SOC inicial de la
-# hora h+1, garantizando la continuidad física de la batería.
-#
-# Esquema por día (24 ventanas de 1h):
-#
-#   Ventana 1:  hora [0]      -> SOC_ini = SOC_0 (aleatorio)
-#   Ventana 2:  hora [1]      -> SOC_ini = SOC_final(ventana 1)
-#   Ventana 3:  hora [2]      -> SOC_ini = SOC_final(ventana 2)
-#   ...
-#   Ventana 24: hora [23]     -> SOC_ini = SOC_final(ventana 23)
-#
-# Cada ventana es un problema MILP independiente.
-# La solución de cada ventana (p_bat, SOC) se concatena para
-# reconstruir el perfil completo del día (24 valores).
-#
-# Comparación con T=24h:
-# -----------------------
-# T=24h optimiza el día completo de golpe → máxima anticipación.
-# T=1h optimiza hora a hora sin visión futura → reactivo puro.
-# Se espera un coste de operación más alto que T=24h por la
-# falta de anticipación (no puede planificar arbitraje).
-#
-# Estructura del dataset generado (igual que T=24h):
+# Estrategia de horizonte T=2h (ventana deslizante):
 # ---------------------------------------------------
-#   dataset_vpp_completo_T1h.csv  -> todas las variables
-#   dataset_vpp_ia_T1h.csv        -> entradas/salidas IA
+# Cada ventana optimiza 2 horas consecutivas pero solo se
+# EJECUTA (guarda como solución definitiva) la PRIMERA hora.
+# La segunda hora se re-optimiza en la siguiente ventana con
+# información actualizada. Esto sigue el principio del MPC:
+# optimizar N pasos pero ejecutar solo el primero.
 #
-# Cada fila = 1 día completo (24h reconstruidas).
+# El SOC final de la hora ejecutada se pasa como SOC inicial
+# de la siguiente ventana, encadenando físicamente la batería.
+#
+# Esquema por día (23 ventanas de 2h, paso de 1h):
+#
+#   Ventana 1:  horas [0, 1]   -> ejecuta hora 0
+#   Ventana 2:  horas [1, 2]   -> ejecuta hora 1
+#   Ventana 3:  horas [2, 3]   -> ejecuta hora 2
+#   ...
+#   Ventana 23: horas [22, 23] -> ejecuta hora 22
+#   Hora 23: se toma directamente de la ventana 23 (segunda hora)
+#
+# Por qué T=2h puede ser mejor que T=1h y T=24h:
+# ------------------------------------------------
+# - Frente a T=1h: tiene 1h de anticipación, puede planificar
+#   micro-arbitraje (si la hora siguiente es más cara, carga ahora)
+# - Frente a T=24h: el problema es más pequeño y resuelve
+#   con mayor certeza en horizontes cortos donde la incertidumbre
+#   de precios y PV es menor → soluciones más consistentes
+#
+# Estructura del dataset generado:
+# ---------------------------------
+#   dataset_vpp_completo_T2h.csv  -> todas las variables
+#   dataset_vpp_ia_T2h.csv        -> entradas/salidas IA
+#
 # Columnas idénticas al dataset T=24h para comparación directa.
 #
 # ==============================================================
@@ -67,18 +68,22 @@ np.random.seed(42)
 
 DIAS       = 1000   # número total de escenarios diarios
 T_DIA      = 24     # horas totales por día
-T_VEN      = 1      # horas por ventana de optimización
+T_VEN      = 2      # horas por ventana de optimización
+PASO       = 1      # desplazamiento de la ventana (horas)
 DELTA_T    = 1      # resolución temporal (h)
 
-DIAS_TRAIN = 800    # escenarios para entrenamiento
-DIAS_TEST  = 200    # escenarios para evaluación
+# Número de ventanas por día
+# Ventana i cubre horas [i, i+1], i = 0..22
+N_VENTANAS = T_DIA - T_VEN + 1   # = 23
+
+DIAS_TRAIN = 800
+DIAS_TEST  = 200
 
 # ==============================================================
 # PARÁMETROS DEL SISTEMA
 # (idénticos a T=24h para comparación directa)
 # ==============================================================
 
-# --- Batería (BESS) ---
 SOC_MIN    = 0.20
 SOC_MAX    = 0.90
 P_CH_MAX   = 0.30
@@ -88,11 +93,9 @@ ETA_DIS    = 0.95
 E_BAT_CAP  = 1.0
 C_DEG      = 2.0
 
-# --- Red eléctrica ---
 P_GRID_MAX   = 10.0
 FACTOR_VENTA = 0.80
 
-# --- Turbina de gas (respaldo) ---
 P_DG_MIN  = 1.0
 P_DG_MAX  = 5.0
 DG_RAMP   = 2.0
@@ -104,13 +107,6 @@ C_DG_B    = 10.0
 # ==============================================================
 
 def generar_escenario():
-    """
-    Genera un escenario diario completo (24h) con perfiles de
-    precios, generación PV, demanda y SOC inicial aleatorio.
-    Función idéntica a la versión T=24h para garantizar que
-    ambos datasets contienen exactamente los mismos escenarios
-    y las comparaciones de coste son válidas.
-    """
     t = np.arange(T_DIA)
 
     shift   = np.random.uniform(-3, 3)
@@ -139,92 +135,98 @@ def generar_escenario():
     return precios, pv, demanda, soc0
 
 # ==============================================================
-# MODELO DE OPTIMIZACIÓN MILP — VENTANA DE 1 HORA
+# MODELO DE OPTIMIZACIÓN MILP — VENTANA DE 2 HORAS
 # ==============================================================
 
-def optimizar_ventana_1h(precio_h, pv_h, demanda_h, soc_ini,
+def optimizar_ventana_2h(precios_v, pv_v, demanda_v, soc_ini,
                           p_dg_prev=None):
     """
-    Resuelve el problema MILP para UNA sola hora.
+    Resuelve el problema MILP para una ventana de 2 horas.
 
     Parámetros
     ----------
-    precio_h  : float  - precio del mercado en esa hora (€/MWh)
-    pv_h      : float  - generación fotovoltaica en esa hora (MW)
-    demanda_h : float  - demanda eléctrica en esa hora (MW)
-    soc_ini   : float  - SOC inicial de esta hora (p.u.)
-                         = SOC final de la hora anterior
-    p_dg_prev : float  - potencia DG hora anterior (MW) para rampa
-                         None si es la primera hora del día
+    precios_v  : array (2,) - precios de las 2 horas de la ventana
+    pv_v       : array (2,) - generación PV de las 2 horas
+    demanda_v  : array (2,) - demanda de las 2 horas
+    soc_ini    : float      - SOC al inicio de la ventana (p.u.)
+    p_dg_prev  : float      - potencia DG hora anterior (para rampa)
+                              None si es la primera ventana del día
 
     Retorna
     -------
-    resultado : dict con p_bat, p_ch, p_dis, soc_fin, p_red,
-                p_dg, coste — o None si el solver falla
+    hora0 : dict con la solución de la primera hora de la ventana
+            (la que se ejecuta como decisión definitiva)
+            Incluye: p_bat, soc, p_red, p_dg, coste
+    None si el solver no encuentra solución óptima
     """
 
     model = ConcreteModel()
-    model.T = RangeSet(0, 0)   # una sola hora
+    model.T = RangeSet(0, T_VEN - 1)   # índices 0, 1
 
-    # Variables continuas
     model.P_ch        = Var(model.T, bounds=(0, P_CH_MAX))
     model.P_dis       = Var(model.T, bounds=(0, P_DIS_MAX))
     model.SOC         = Var(model.T, bounds=(SOC_MIN, SOC_MAX))
     model.P_grid_buy  = Var(model.T, bounds=(0, P_GRID_MAX))
     model.P_grid_sell = Var(model.T, bounds=(0, P_GRID_MAX))
     model.P_dg        = Var(model.T, bounds=(P_DG_MIN, P_DG_MAX))
+    model.u_ch        = Var(model.T, within=Binary)
+    model.u_dis       = Var(model.T, within=Binary)
 
-    # Variables binarias (no simultaneidad carga/descarga)
-    model.u_ch  = Var(model.T, within=Binary)
-    model.u_dis = Var(model.T, within=Binary)
-
-    # Función objetivo: minimizar coste de esta hora
+    # Función objetivo: coste total de las 2 horas de la ventana
     def objective_rule(m):
-        t = 0
-        return (
-              precio_h * m.P_grid_buy[t]  * DELTA_T
-            - FACTOR_VENTA * precio_h * m.P_grid_sell[t] * DELTA_T
+        return sum(
+              precios_v[t] * m.P_grid_buy[t]  * DELTA_T
+            - FACTOR_VENTA * precios_v[t] * m.P_grid_sell[t] * DELTA_T
             + C_DG_B * m.P_dg[t] * DELTA_T
             + C_DEG  * (m.P_ch[t] + m.P_dis[t]) * DELTA_T
+            for t in m.T
         )
 
     model.obj = Objective(rule=objective_rule, sense=minimize)
 
     model.constraints = ConstraintList()
-    t = 0
 
-    # Balance de potencia
-    model.constraints.add(
-        pv_h + model.P_dis[t] + model.P_grid_buy[t] + model.P_dg[t]
-        ==
-        demanda_h + model.P_ch[t] + model.P_grid_sell[t]
-    )
+    for t in model.T:
+        # Balance de potencia
+        model.constraints.add(
+            pv_v[t] + model.P_dis[t] + model.P_grid_buy[t] + model.P_dg[t]
+            ==
+            demanda_v[t] + model.P_ch[t] + model.P_grid_sell[t]
+        )
+        # Límites vinculados a binarias
+        model.constraints.add(model.P_ch[t]  <= P_CH_MAX  * model.u_ch[t])
+        model.constraints.add(model.P_dis[t] <= P_DIS_MAX * model.u_dis[t])
+        # No simultaneidad
+        model.constraints.add(model.u_ch[t] + model.u_dis[t] <= 1)
 
-    # Límites de carga/descarga vinculados a binarias
-    model.constraints.add(model.P_ch[t]  <= P_CH_MAX  * model.u_ch[t])
-    model.constraints.add(model.P_dis[t] <= P_DIS_MAX * model.u_dis[t])
+    # Dinámica del SOC hora a hora dentro de la ventana
+    for t in model.T:
+        soc_prev = soc_ini if t == 0 else model.SOC[t - 1]
+        model.constraints.add(
+            model.SOC[t]
+            == soc_prev
+               + (ETA_CH * model.P_ch[t] * DELTA_T
+                  - model.P_dis[t] * DELTA_T / ETA_DIS) / E_BAT_CAP
+        )
 
-    # No simultaneidad
-    model.constraints.add(model.u_ch[t] + model.u_dis[t] <= 1)
-
-    # Dinámica del SOC
-    model.constraints.add(
-        model.SOC[t]
-        == soc_ini
-           + (ETA_CH * model.P_ch[t] * DELTA_T
-              - model.P_dis[t] * DELTA_T / ETA_DIS) / E_BAT_CAP
-    )
-
-    # Restricción de rampa de la turbina (si no es la primera hora)
+    # Rampa de la turbina entre la hora anterior y la primera hora
+    # de esta ventana (continuidad entre ventanas)
     if p_dg_prev is not None:
         model.constraints.add(
-            model.P_dg[t] - p_dg_prev <= DG_RAMP
+            model.P_dg[0] - p_dg_prev <= DG_RAMP
         )
         model.constraints.add(
-            p_dg_prev - model.P_dg[t] <= DG_RAMP
+            p_dg_prev - model.P_dg[0] <= DG_RAMP
         )
 
-    # Resolución con HiGHS
+    # Rampa entre las 2 horas internas de la ventana
+    model.constraints.add(
+        model.P_dg[1] - model.P_dg[0] <= DG_RAMP
+    )
+    model.constraints.add(
+        model.P_dg[0] - model.P_dg[1] <= DG_RAMP
+    )
+
     solver    = SolverFactory('highs')
     resultado = solver.solve(model, tee=False)
 
@@ -232,6 +234,8 @@ def optimizar_ventana_1h(precio_h, pv_h, demanda_h, soc_ini,
             != TerminationCondition.optimal):
         return None
 
+    # Solo devolvemos la PRIMERA hora (hora 0 de la ventana)
+    # que es la decisión que se ejecuta definitivamente
     return {
         'p_ch'   : value(model.P_ch[0]),
         'p_dis'  : value(model.P_dis[0]),
@@ -241,7 +245,19 @@ def optimizar_ventana_1h(precio_h, pv_h, demanda_h, soc_ini,
         'p_sell' : value(model.P_grid_sell[0]),
         'p_red'  : value(model.P_grid_buy[0]) - value(model.P_grid_sell[0]),
         'p_dg'   : value(model.P_dg[0]),
-        'coste'  : value(model.obj),
+        'coste'  : (  value(model.P_grid_buy[0])  * precios_v[0] * DELTA_T
+                    - value(model.P_grid_sell[0]) * FACTOR_VENTA * precios_v[0] * DELTA_T
+                    + C_DG_B * value(model.P_dg[0]) * DELTA_T
+                    + C_DEG  * (value(model.P_ch[0]) + value(model.P_dis[0])) * DELTA_T),
+        # Guardamos también la segunda hora para la última ventana
+        'p_bat_h1' : value(model.P_ch[1]) - value(model.P_dis[1]),
+        'soc_h1'   : value(model.SOC[1]),
+        'p_red_h1' : value(model.P_grid_buy[1]) - value(model.P_grid_sell[1]),
+        'p_dg_h1'  : value(model.P_dg[1]),
+        'coste_h1' : (  value(model.P_grid_buy[1])  * precios_v[1] * DELTA_T
+                      - value(model.P_grid_sell[1]) * FACTOR_VENTA * precios_v[1] * DELTA_T
+                      + C_DG_B * value(model.P_dg[1]) * DELTA_T
+                      + C_DEG  * (value(model.P_ch[1]) + value(model.P_dis[1])) * DELTA_T),
     }
 
 # ==============================================================
@@ -252,33 +268,41 @@ dataset_completo = []
 dataset_ia       = []
 fallos           = 0
 
-print(f"\nGenerando {DIAS} escenarios con horizonte T=1h")
-print(f"  Estrategia: 24 problemas MILP independientes por día")
-print(f"  SOC encadenado: SOC_fin(h) -> SOC_ini(h+1)")
+print(f"\nGenerando {DIAS} escenarios con horizonte T=2h")
+print(f"  Estrategia: ventana deslizante de 2h, paso 1h")
+print(f"  Ventanas por día: {N_VENTANAS}")
+print(f"  Se ejecuta: solo la primera hora de cada ventana")
+print(f"  SOC encadenado: SOC_fin(ventana i) -> SOC_ini(ventana i+1)")
 print(f"  Solver: HiGHS (MILP — optimalidad global)\n")
 
 for d in range(DIAS):
 
     precios, pv, demanda, soc0 = generar_escenario()
 
-    # Arrays para almacenar la solución del día completo
     p_bat_dia  = np.zeros(T_DIA)
     soc_dia    = np.zeros(T_DIA)
     p_red_dia  = np.zeros(T_DIA)
     p_dg_dia   = np.zeros(T_DIA)
     coste_dia  = 0.0
 
-    soc_actual  = soc0
-    p_dg_prev   = None
-    fallo_dia   = False
+    soc_actual = soc0
+    p_dg_prev  = None
+    fallo_dia  = False
 
-    # --- 24 ventanas de 1 hora ---
-    for h in range(T_DIA):
+    # --- 23 ventanas deslizantes de 2h ---
+    # La ventana i cubre las horas [i, i+1]
+    # Se ejecuta la hora i (primera de la ventana)
+    # La hora 23 se toma de la última ventana (hora 1 de ventana 22)
 
-        res = optimizar_ventana_1h(
-            precio_h  = precios[h],
-            pv_h      = pv[h],
-            demanda_h = demanda[h],
+    for i in range(N_VENTANAS):   # i = 0..22
+
+        h_ini = i
+        h_fin = i + T_VEN         # h_fin = i+2 (exclusivo)
+
+        res = optimizar_ventana_2h(
+            precios_v = precios[h_ini:h_fin],
+            pv_v      = pv[h_ini:h_fin],
+            demanda_v = demanda[h_ini:h_fin],
             soc_ini   = soc_actual,
             p_dg_prev = p_dg_prev
         )
@@ -287,20 +311,30 @@ for d in range(DIAS):
             fallo_dia = True
             break
 
-        # Guardar solución de esta hora
-        p_bat_dia[h] = round(res['p_bat'], 4)
-        soc_dia[h]   = round(res['soc'],   4)
-        p_red_dia[h] = round(res['p_red'], 4)
-        p_dg_dia[h]  = round(res['p_dg'],  4)
+        # Guardar la hora ejecutada (hora i = primera de la ventana)
+        p_bat_dia[i] = round(res['p_bat'], 4)
+        soc_dia[i]   = round(res['soc'],   4)
+        p_red_dia[i] = round(res['p_red'], 4)
+        p_dg_dia[i]  = round(res['p_dg'],  4)
         coste_dia   += res['coste']
 
-        # Encadenar: SOC final -> SOC inicial siguiente hora
+        # Encadenar SOC: el SOC al final de la hora ejecutada
+        # pasa como SOC inicial de la siguiente ventana
         soc_actual = res['soc']
         p_dg_prev  = res['p_dg']
 
+        # La última ventana (i=22) cubre horas [22,23]
+        # Guardamos también la hora 23 (segunda hora de la ventana 22)
+        if i == N_VENTANAS - 1:
+            p_bat_dia[23] = round(res['p_bat_h1'], 4)
+            soc_dia[23]   = round(res['soc_h1'],   4)
+            p_red_dia[23] = round(res['p_red_h1'], 4)
+            p_dg_dia[23]  = round(res['p_dg_h1'],  4)
+            coste_dia    += res['coste_h1']
+
     if fallo_dia:
         fallos += 1
-        print(f"  [AVISO] Escenario {d} con fallo en alguna hora — omitido")
+        print(f"  [AVISO] Escenario {d} con fallo en alguna ventana — omitido")
         continue
 
     split = 'train' if d < DIAS_TRAIN else 'test'
@@ -314,7 +348,7 @@ for d in range(DIAS):
         'split'       : split,
         'soc_inicial' : round(soc0, 4),
         'coste_total' : round(coste_dia, 4),
-        'horizonte'   : 1,
+        'horizonte'   : 2,
     }
     for h in range(T_DIA):
         fila_full[f'precio_h{h}']  = round(precios[h], 4)
@@ -335,8 +369,6 @@ for d in range(DIAS):
 
     # ==========================================================
     # DATASET IA (misma estructura que T=24h)
-    # Entradas: soc_inicial + precio(24) + pv(24) + demanda(24)
-    # Salidas:  p_bat(24) + soc(24)
     # ==========================================================
 
     fila_ia = {
@@ -367,8 +399,8 @@ for d in range(DIAS):
 df_full = pd.DataFrame(dataset_completo)
 df_ia   = pd.DataFrame(dataset_ia)
 
-df_full.to_csv(os.path.join(DIR, "dataset_vpp_completo_T1h.csv"), index=False)
-df_ia.to_csv(  os.path.join(DIR, "dataset_vpp_ia_T1h.csv"),       index=False)
+df_full.to_csv(os.path.join(DIR, "dataset_vpp_completo_T2h.csv"), index=False)
+df_ia.to_csv(  os.path.join(DIR, "dataset_vpp_ia_T2h.csv"),       index=False)
 
 # ==============================================================
 # RESUMEN FINAL
@@ -377,19 +409,21 @@ df_ia.to_csv(  os.path.join(DIR, "dataset_vpp_ia_T1h.csv"),       index=False)
 escenarios_ok = DIAS - fallos
 
 print("\n" + "=" * 58)
-print("  DATASET T=1h GENERADO")
+print("  DATASET T=2h GENERADO")
 print("=" * 58)
-print(f"  Horizonte por ventana : T = 1 h")
-print(f"  Ventanas por día      : 24 (una por hora)")
-print(f"  Estrategia SOC        : encadenado hora a hora")
+print(f"  Horizonte por ventana : T = 2 h")
+print(f"  Ventanas por día      : {N_VENTANAS} (deslizante, paso 1h)")
+print(f"  Hora ejecutada        : primera hora de cada ventana")
+print(f"  Anticipación          : 1 hora vista")
+print(f"  Estrategia SOC        : encadenado ventana a ventana")
 print(f"  Escenarios solicitados: {DIAS}")
 print(f"  Resueltos con éxito   : {escenarios_ok}")
 print(f"  Fallos omitidos       : {fallos}")
 print(f"  Train / Test          : {DIAS_TRAIN} / {DIAS_TEST}")
 print()
 print("  Archivos generados:")
-print("    1) dataset_vpp_completo_T1h.csv")
-print("    2) dataset_vpp_ia_T1h.csv")
+print("    1) dataset_vpp_completo_T2h.csv")
+print("    2) dataset_vpp_ia_T2h.csv")
 print()
 print("  Estructura dataset IA (igual que T=24h):")
 print("    Entradas (73): soc_inicial + precio×24 + pv×24 + demanda×24")
