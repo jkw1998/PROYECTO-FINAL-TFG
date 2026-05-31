@@ -6,54 +6,26 @@
 #
 # Descripcion:
 # ------------
-# Lee los resultados de los 4 horizontes (T=1h, T=2h, T=4h,
-# T=24h) y los 4 modelos (MLP, RNN, LSTM, GRU) y genera
-# las tablas y figuras del analisis comparativo del Cap. 7.
+# Lee los 16 ficheros de resultados (4 modelos x 4 horizontes)
+# generados por los scripts de entrenamiento y produce las
+# figuras y tablas del analisis comparativo del Cap. 7.
 #
-# Estructura de CSV esperada:
-# ----------------------------
-# Para T=24h los CSV estan en el mismo directorio que este script:
-#   mlp_resultados.csv, rnn_resultados.csv,
-#   lstm_resultados.csv, gru_resultados.csv
+# Estructura esperada (relativa a este script en COMPARATIVAS/):
+#   ../MLP/MLP_T1h_resultados.csv
+#   ../MLP/MLP_T2h_resultados.csv  ... etc
+#   ../RNN/RNN_T1h_resultados.csv  ... etc
+#   ../LSTM/LSTM_T1h_resultados.csv ... etc
+#   ../GRU/GRU_T1h_resultados.csv  ... etc
+#   ../dataset/dataset_vpp_completo.csv
 #
-# Para T=1h, T=2h, T=4h estan en subcarpetas:
-#   ../1 hora dataset/mlp_resultados_T1h.csv   (etc.)
-#   ../2 horas dataset/mlp_resultados_T2h.csv  (etc.)
-#   ../4 horas dataset/mlp_resultados_T4h.csv  (etc.)
-#
-# AJUSTA LAS RUTAS al final del bloque de configuracion si
-# tu estructura de carpetas es diferente.
-#
-# Figuras generadas:
-# ------------------
-#  1) matriz_MAE_Pbat.png
-#     Heatmap de la matriz 4x4 horizonte x modelo (MAE P_bat)
-#
-#  2) matriz_MAE_SOC.png
-#     Heatmap de la matriz 4x4 horizonte x modelo (MAE SOC)
-#
-#  3) efecto_horizonte_MAE.png
-#     Lineas: MAE P_bat vs horizonte para cada modelo
-#
-#  4) efecto_horizonte_RMSE.png
-#     Lineas: RMSE P_bat vs horizonte para cada modelo
-#
-#  5) boxplot_coste_horizontes.png
-#     Boxplot del coste J* del optimizador por horizonte +
-#     incremento porcentual respecto a T=24h
-#
-#  6) barras_comparativa_completa.png
-#     Barras agrupadas: MAE P_bat para todas las combinaciones
-#
-#  7) error_hora_todos_horizontes.png
-#     MAE por hora del dia para el mejor modelo en cada horizonte
-#
-# Tablas impresas en consola:
-# ---------------------------
-#  - Matriz MAE P_bat (4 horizontes x 4 modelos)
-#  - Matriz RMSE P_bat
-#  - Matriz MAE SOC
-#  - Tabla ranking de las 16 combinaciones por MAE P_bat
+# Figuras generadas en COMPARATIVAS/:
+#   1) matriz_MAE_Pbat.png
+#   2) matriz_MAE_SOC.png
+#   3) efecto_horizonte_MAE.png
+#   4) efecto_horizonte_RMSE.png
+#   5) barras_comparativa_completa.png
+#   6) error_hora_todos_horizontes.png
+#   7) tabla_comparativa_visual.png
 # =============================================================
 
 import os
@@ -62,45 +34,14 @@ import pandas as pd
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
 
-# =============================================================
-# CONFIGURACION DE RUTAS
-# =============================================================
-
-# Directorio de este script (comparativas/)
-DIR = os.path.dirname(os.path.abspath(__file__))
-
-# Directorio raiz del proyecto (un nivel arriba de comparativas/)
+DIR      = os.path.dirname(os.path.abspath(__file__))
 DIR_RAIZ = os.path.dirname(DIR)
-
-# Las figuras se guardan en comparativas/ (junto a este script)
-# Los CSV de resultados estan en las carpetas de cada horizonte
-DIRS_HORIZONTES = {
-    'T=1h' : os.path.join(DIR_RAIZ, '1 hora dataset'),
-    'T=2h' : os.path.join(DIR_RAIZ, '2 horas dataset'),
-    'T=4h' : os.path.join(DIR_RAIZ, '4 horas dataset'),
-    'T=24h': DIR_RAIZ,
-}
-
-SUFIJOS = {
-    'T=1h' : '_T1h',
-    'T=2h' : '_T2h',
-    'T=4h' : '_T4h',
-    'T=24h': '',
-}
-
-# Datasets completos para comparar coste del optimizador
-DIRS_COMPLETO = {
-    'T=1h' : os.path.join(DIR_RAIZ, '1 hora dataset', 'dataset_vpp_completo_T1h.csv'),
-    'T=2h' : os.path.join(DIR_RAIZ, '2 horas dataset', 'dataset_vpp_completo_T2h.csv'),
-    'T=4h' : os.path.join(DIR_RAIZ, '4 horas dataset', 'dataset_vpp_completo_T4h.csv'),
-    'T=24h': os.path.join(DIR_RAIZ, 'dataset_vpp_completo.csv'),
-}
 
 MODELOS    = ['MLP', 'RNN', 'LSTM', 'GRU']
 HORIZONTES = ['T=1h', 'T=2h', 'T=4h', 'T=24h']
-H_VALS     = [1, 2, 4, 24]   # valores numericos para ejes X
+H_VALS     = [1, 2, 4, 24]
+T          = 24
 
 COLORES_MOD = {'MLP': '#2196F3', 'RNN': '#FF9800',
                'LSTM': '#4CAF50', 'GRU': '#F44336'}
@@ -108,383 +49,331 @@ COLORES_HOR = {'T=1h': '#E91E63', 'T=2h': '#9C27B0',
                'T=4h': '#FF9800', 'T=24h': '#2196F3'}
 MARCADORES  = {'MLP': 'o', 'RNN': 's', 'LSTM': '^', 'GRU': 'D'}
 
-T     = 24
-SPLIT = 800
+P_RNG, S_RNG = 0.80, 0.70
+
+# Sufijos de los ficheros CSV por horizonte
+SUFIJOS = {'T=1h': 'T1h', 'T=2h': 'T2h', 'T=4h': 'T4h', 'T=24h': 'T24h'}
 
 # =============================================================
 # CARGA DE TODOS LOS RESULTADOS
 # =============================================================
 
-print("Cargando resultados de todos los horizontes...\n")
+print("Cargando resultados de los 16 scripts...\n")
 
 # datos[horizonte][modelo] = DataFrame
 datos = {h: {} for h in HORIZONTES}
 
 for horizonte in HORIZONTES:
-    dir_h  = DIRS_HORIZONTES[horizonte]
-    sufijo = SUFIJOS[horizonte]
+    suf = SUFIJOS[horizonte]
     for modelo in MODELOS:
-        nombre = f"{modelo.lower()}_resultados{sufijo}.csv"
-        ruta   = os.path.join(dir_h, nombre)
+        ruta = os.path.join(DIR_RAIZ, modelo,
+                            f'{modelo}_{suf}_resultados.csv')
         if os.path.exists(ruta):
             datos[horizonte][modelo] = pd.read_csv(ruta)
-            print(f"  OK  {horizonte} / {modelo}: {ruta}")
+            print(f"  OK  {horizonte} / {modelo}")
         else:
-            print(f"  --  {horizonte} / {modelo}: NO ENCONTRADO ({ruta})")
+            print(f"  --  {horizonte} / {modelo}: NO ENCONTRADO")
 
 print()
 
 # =============================================================
-# CALCULO DE METRICAS PARA TODAS LAS COMBINACIONES
+# CALCULO DE METRICAS — MATRIZ 4 HORIZONTES x 4 MODELOS
 # =============================================================
 
-# mat_mae_acc[h_idx][m_idx] = MAE P_bat
 mat_mae_acc  = np.full((len(HORIZONTES), len(MODELOS)), np.nan)
 mat_rmse_acc = np.full((len(HORIZONTES), len(MODELOS)), np.nan)
 mat_mae_soc  = np.full((len(HORIZONTES), len(MODELOS)), np.nan)
 mat_rmse_soc = np.full((len(HORIZONTES), len(MODELOS)), np.nan)
+mat_nmae_acc = np.full((len(HORIZONTES), len(MODELOS)), np.nan)
+mat_nmae_soc = np.full((len(HORIZONTES), len(MODELOS)), np.nan)
 
 for i, horizonte in enumerate(HORIZONTES):
     for j, modelo in enumerate(MODELOS):
         if modelo not in datos[horizonte]:
             continue
         df = datos[horizonte][modelo]
-        err_acc = df['ACCION_REAL'] - df['ACCION_IA']
-        err_soc = df['SOC_REAL']    - df['SOC_IA']
-        mat_mae_acc[i, j]  = err_acc.abs().mean()
-        mat_rmse_acc[i, j] = np.sqrt((err_acc**2).mean())
-        mat_mae_soc[i, j]  = err_soc.abs().mean()
-        mat_rmse_soc[i, j] = np.sqrt((err_soc**2).mean())
+        ea = df['ACCION_REAL'] - df['ACCION_IA']
+        es = df['SOC_REAL']    - df['SOC_IA']
+        mat_mae_acc[i, j]  = ea.abs().mean()
+        mat_rmse_acc[i, j] = np.sqrt((ea**2).mean())
+        mat_mae_soc[i, j]  = es.abs().mean()
+        mat_rmse_soc[i, j] = np.sqrt((es**2).mean())
+        mat_nmae_acc[i, j] = ea.abs().mean() / P_RNG * 100
+        mat_nmae_soc[i, j] = es.abs().mean() / S_RNG * 100
 
 # =============================================================
 # TABLAS EN CONSOLA
 # =============================================================
 
-def imprimir_matriz(titulo, matriz, fmt='.4f'):
+def imprimir_matriz(titulo, matriz, unidad=''):
     print(f"\n{'='*65}")
     print(f"  {titulo}")
     print(f"{'='*65}")
-    header = f"  {'Horizonte':<10}" + "".join(f"{m:>10}" for m in MODELOS)
-    print(header)
+    print(f"  {'Horizonte':<10}" + "".join(f"{m:>12}" for m in MODELOS))
     print("-"*65)
     for i, h in enumerate(HORIZONTES):
         fila = f"  {h:<10}"
         for j in range(len(MODELOS)):
             v = matriz[i, j]
-            fila += f"{v:>10{fmt}}" if not np.isnan(v) else f"{'--':>10}"
+            fila += f"{v:>11.4f} " if not np.isnan(v) else f"{'--':>12}"
         print(fila)
     print("="*65)
 
-imprimir_matriz("MATRIZ MAE P_bat (MW)  — horizonte x modelo", mat_mae_acc)
-imprimir_matriz("MATRIZ RMSE P_bat (MW) — horizonte x modelo", mat_rmse_acc)
-imprimir_matriz("MATRIZ MAE SOC (p.u.)  — horizonte x modelo", mat_mae_soc)
-imprimir_matriz("MATRIZ RMSE SOC (p.u.) — horizonte x modelo", mat_rmse_soc)
+imprimir_matriz("MATRIZ MAE P_bat (MW)",  mat_mae_acc)
+imprimir_matriz("MATRIZ RMSE P_bat (MW)", mat_rmse_acc)
+imprimir_matriz("MATRIZ MAE SOC (p.u.)",  mat_mae_soc)
+imprimir_matriz("MATRIZ nMAE P_bat (%rango)", mat_nmae_acc)
 
-# Ranking de las combinaciones
-print(f"\n{'='*65}")
-print("  RANKING — 16 combinaciones por MAE P_bat (menor = mejor)")
-print(f"{'='*65}")
-filas_ranking = []
+# Ranking de las 16 combinaciones
+print(f"\n{'='*60}")
+print("  RANKING — 16 combinaciones por MAE P_bat")
+print(f"{'='*60}")
+ranking = []
 for i, h in enumerate(HORIZONTES):
     for j, m in enumerate(MODELOS):
-        v = mat_mae_acc[i, j]
-        if not np.isnan(v):
-            filas_ranking.append((v, h, m))
-filas_ranking.sort()
-for rank, (v, h, m) in enumerate(filas_ranking, 1):
-    print(f"  {rank:2d}. {h} + {m:<5}  MAE = {v:.4f} MW")
-print("="*65)
+        if not np.isnan(mat_mae_acc[i, j]):
+            ranking.append((mat_mae_acc[i, j], h, m,
+                            mat_mae_soc[i, j], mat_nmae_acc[i, j]))
+ranking.sort()
+for rank, (v, h, m, vs, nv) in enumerate(ranking, 1):
+    print(f"  {rank:2d}. {h} + {m:<5}  MAE={v:.4f} MW  "
+          f"MAE_SOC={vs:.4f}  nMAE={nv:.1f}%")
+print("="*60)
 
 # =============================================================
-# FIGURA 1 — HEATMAP MATRIZ MAE P_bat
+# FIGURA 1 y 2 — HEATMAPS
 # =============================================================
 
-def heatmap_matriz(matriz, titulo, nombre_archivo, fmt='.4f', cmap='RdYlGn_r'):
-    fig, ax = plt.subplots(figsize=(7, 4))
-    mask = ~np.isnan(matriz)
-    data_plot = np.where(mask, matriz, 0)
-
-    # Solo colorear celdas con datos
-    im = ax.imshow(data_plot, cmap=cmap, aspect='auto',
-                   vmin=np.nanmin(matriz), vmax=np.nanmax(matriz))
-
-    ax.set_xticks(range(len(MODELOS)))
-    ax.set_yticks(range(len(HORIZONTES)))
-    ax.set_xticklabels(MODELOS, fontsize=11)
-    ax.set_yticklabels(HORIZONTES, fontsize=11)
-    ax.set_xlabel('Modelo', fontsize=11)
-    ax.set_ylabel('Horizonte', fontsize=11)
+def heatmap(matriz, titulo, fname, cmap='RdYlGn_r', fmt='.4f'):
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    data = np.where(~np.isnan(matriz), matriz, 0)
+    vmin, vmax = np.nanmin(matriz), np.nanmax(matriz)
+    im = ax.imshow(data, cmap=cmap, aspect='auto', vmin=vmin, vmax=vmax)
+    ax.set_xticks(range(len(MODELOS)));    ax.set_xticklabels(MODELOS, fontsize=11)
+    ax.set_yticks(range(len(HORIZONTES))); ax.set_yticklabels(HORIZONTES, fontsize=11)
+    ax.set_xlabel('Modelo', fontsize=11); ax.set_ylabel('Horizonte', fontsize=11)
     ax.set_title(titulo, fontsize=12, fontweight='bold')
 
+    med = np.nanmedian(matriz)
     for i in range(len(HORIZONTES)):
         for j in range(len(MODELOS)):
             v = matriz[i, j]
-            txt = f'{v:{fmt}}' if not np.isnan(v) else '--'
-            color = 'white' if v > np.nanmedian(matriz) else 'black'
+            txt   = f'{v:{fmt}}' if not np.isnan(v) else '--'
+            color = 'white' if v > med else 'black'
             ax.text(j, i, txt, ha='center', va='center',
                     fontsize=10, color=color, fontweight='bold')
 
-    # Marcar la celda minima con borde verde
+    # Marcar minimo con borde verde
     idx_min = np.unravel_index(np.nanargmin(matriz), matriz.shape)
-    rect = plt.Rectangle((idx_min[1]-0.5, idx_min[0]-0.5), 1, 1,
-                          fill=False, edgecolor='lime',
-                          linewidth=3, zorder=5)
-    ax.add_patch(rect)
+    ax.add_patch(plt.Rectangle(
+        (idx_min[1]-0.5, idx_min[0]-0.5), 1, 1,
+        fill=False, edgecolor='lime', linewidth=3, zorder=5))
 
     plt.colorbar(im, ax=ax, shrink=0.8)
     plt.tight_layout()
-    ruta = os.path.join(DIR, nombre_archivo)
-    plt.savefig(ruta, dpi=150, bbox_inches='tight')
+    plt.savefig(os.path.join(DIR, fname), dpi=150, bbox_inches='tight')
     plt.close()
-    print(f"  Guardada: {nombre_archivo}")
+    print(f"  Guardada: {fname}")
 
-heatmap_matriz(mat_mae_acc,
-               'Matriz MAE $P_{bat}$ (MW) — horizonte × modelo',
-               'matriz_MAE_Pbat.png')
-heatmap_matriz(mat_mae_soc,
-               'Matriz MAE SOC (p.u.) — horizonte × modelo',
-               'matriz_MAE_SOC.png', fmt='.4f', cmap='RdYlGn_r')
+heatmap(mat_mae_acc,  'Matriz MAE P_bat (MW) - horizonte x modelo',
+        'matriz_MAE_Pbat.png')
+heatmap(mat_mae_soc,  'Matriz MAE SOC (p.u.) - horizonte x modelo',
+        'matriz_MAE_SOC.png')
+heatmap(mat_nmae_acc, 'Matriz nMAE P_bat (% rango) - horizonte x modelo',
+        'matriz_nMAE_Pbat.png', fmt='.1f')
 
 # =============================================================
-# FIGURA 2 — LINEAS: MAE vs HORIZONTE POR MODELO
+# FIGURA 3 y 4 — LINEAS: METRICA vs HORIZONTE POR MODELO
 # =============================================================
 
-def lineas_horizonte(matriz, ylabel, titulo, nombre_archivo):
+def lineas_horizonte(matriz, ylabel, titulo, fname):
     fig, ax = plt.subplots(figsize=(9, 5))
-
     for j, modelo in enumerate(MODELOS):
-        y_vals = matriz[:, j]
-        mask   = ~np.isnan(y_vals)
-        if mask.any():
-            ax.plot(np.array(H_VALS)[mask], y_vals[mask],
-                    label=modelo,
-                    color=COLORES_MOD[modelo],
-                    marker=MARCADORES[modelo],
-                    linewidth=2, markersize=8)
-            # Anotar valores
-            for hv, yv in zip(np.array(H_VALS)[mask], y_vals[mask]):
-                ax.annotate(f'{yv:.3f}',
-                            xy=(hv, yv),
-                            xytext=(0, 10),
-                            textcoords='offset points',
-                            ha='center', fontsize=8,
-                            color=COLORES_MOD[modelo])
+        y    = matriz[:, j]
+        mask = ~np.isnan(y)
+        if not mask.any():
+            continue
+        ax.plot(np.array(H_VALS)[mask], y[mask],
+                label=modelo, color=COLORES_MOD[modelo],
+                marker=MARCADORES[modelo], linewidth=2, markersize=8)
+        for hv, yv in zip(np.array(H_VALS)[mask], y[mask]):
+            ax.annotate(f'{yv:.3f}', xy=(hv, yv),
+                        xytext=(0, 10), textcoords='offset points',
+                        ha='center', fontsize=8, color=COLORES_MOD[modelo])
 
     ax.set_xlabel('Horizonte temporal (h)', fontsize=11)
     ax.set_ylabel(ylabel, fontsize=11)
     ax.set_title(titulo, fontsize=12, fontweight='bold')
-    ax.set_xticks(H_VALS)
-    ax.set_xticklabels(['T=1h', 'T=2h', 'T=4h', 'T=24h'])
-    ax.legend(fontsize=10)
-    ax.grid(True, alpha=0.3)
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-
+    ax.set_xticks(H_VALS); ax.set_xticklabels(HORIZONTES)
+    ax.legend(fontsize=10); ax.grid(True, alpha=0.3)
+    ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False)
     plt.tight_layout()
-    ruta = os.path.join(DIR, nombre_archivo)
-    plt.savefig(ruta, dpi=150, bbox_inches='tight')
+    plt.savefig(os.path.join(DIR, fname), dpi=150, bbox_inches='tight')
     plt.close()
-    print(f"  Guardada: {nombre_archivo}")
+    print(f"  Guardada: {fname}")
 
-lineas_horizonte(mat_mae_acc,
-                 'MAE $P_{bat}$ (MW)',
-                 'Efecto del horizonte sobre MAE $P_{bat}$ por modelo',
+lineas_horizonte(mat_mae_acc,  'MAE P_bat (MW)',
+                 'Efecto del horizonte sobre MAE P_bat por modelo',
                  'efecto_horizonte_MAE.png')
-
-lineas_horizonte(mat_rmse_acc,
-                 'RMSE $P_{bat}$ (MW)',
-                 'Efecto del horizonte sobre RMSE $P_{bat}$ por modelo',
+lineas_horizonte(mat_rmse_acc, 'RMSE P_bat (MW)',
+                 'Efecto del horizonte sobre RMSE P_bat por modelo',
                  'efecto_horizonte_RMSE.png')
+lineas_horizonte(mat_nmae_acc, 'nMAE P_bat (% rango fisico)',
+                 'Efecto del horizonte sobre nMAE P_bat por modelo',
+                 'efecto_horizonte_nMAE.png')
 
 # =============================================================
-# FIGURA 3 — BOXPLOT COSTE OPTIMIZADOR POR HORIZONTE
-# =============================================================
-
-costes_por_horizonte = {}
-for horizonte, ruta_csv in DIRS_COMPLETO.items():
-    if not os.path.exists(ruta_csv):
-        print(f"  [AVISO] No encontrado dataset completo: {ruta_csv}")
-        continue
-    df_full = pd.read_csv(ruta_csv)
-    df_t    = df_full[df_full['split'] == 'test'].reset_index(drop=True)
-
-    # Si el dataset tiene columna coste_total la usamos directamente
-    if 'coste_total' in df_t.columns:
-        costes_por_horizonte[horizonte] = df_t['coste_total'].values
-    else:
-        # Recalcular desde p_red y precio
-        costes = []
-        for _, row in df_t.iterrows():
-            c = 0
-            for h in range(T):
-                p_red = row[f'p_red_h{h}']
-                lam   = row[f'precio_h{h}']
-                p_dg  = row.get(f'p_dg_h{h}', 0)
-                p_ch  = max(0,  row[f'p_bat_h{h}'])
-                p_dis = max(0, -row[f'p_bat_h{h}'])
-                c += (max(0, p_red) * lam
-                      - max(0, -p_red) * lam * 0.80
-                      + 10.0 * p_dg
-                      + 2.0  * (p_ch + p_dis))
-            costes.append(c)
-        costes_por_horizonte[horizonte] = np.array(costes)
-
-if len(costes_por_horizonte) >= 2:
-    h_disponibles = list(costes_por_horizonte.keys())
-    ref = costes_por_horizonte.get('T=24h', None)
-
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-    fig.suptitle('Efecto del horizonte sobre el coste del optimizador',
-                 fontsize=13, fontweight='bold')
-
-    # Subplot 1: boxplot
-    data_box   = [costes_por_horizonte[h] for h in h_disponibles]
-    labels_box = h_disponibles
-    bp = axes[0].boxplot(data_box, labels=labels_box,
-                         patch_artist=True, notch=False)
-    for patch, h in zip(bp['boxes'], h_disponibles):
-        patch.set_facecolor(COLORES_HOR.get(h, 'steelblue'))
-        patch.set_alpha(0.7)
-    axes[0].set_ylabel('Coste $\\mathcal{J}^*$ (€/día)')
-    axes[0].set_xlabel('Horizonte')
-    axes[0].set_title('Distribución del coste óptimo')
-    axes[0].grid(True, alpha=0.3, axis='y')
-
-    # Subplot 2: incremento porcentual respecto a T=24h
-    if ref is not None:
-        ref_media = ref.mean()
-        incrementos = {h: (costes_por_horizonte[h].mean() - ref_media)
-                          / ref_media * 100
-                       for h in h_disponibles}
-        h_plot = [h for h in h_disponibles if h != 'T=24h']
-        inc_plot = [incrementos[h] for h in h_plot]
-        bars = axes[1].bar(h_plot, inc_plot,
-                           color=[COLORES_HOR.get(h, 'gray') for h in h_plot],
-                           alpha=0.8, edgecolor='white')
-        for bar, val in zip(bars, inc_plot):
-            axes[1].text(bar.get_x() + bar.get_width()/2,
-                         bar.get_height() + 0.1,
-                         f'+{val:.1f}%', ha='center', fontsize=10)
-        axes[1].axhline(0, color='black', linewidth=0.8, linestyle='--')
-        axes[1].set_ylabel('Incremento coste respecto T=24h (%)')
-        axes[1].set_xlabel('Horizonte')
-        axes[1].set_title('Sobrecoste vs. T=24h (referencia óptima)')
-        axes[1].grid(True, alpha=0.3, axis='y')
-
-    plt.tight_layout()
-    ruta = os.path.join(DIR, 'boxplot_coste_horizontes.png')
-    plt.savefig(ruta, dpi=150, bbox_inches='tight')
-    plt.close()
-    print(f"  Guardada: boxplot_coste_horizontes.png")
-
-# =============================================================
-# FIGURA 4 — BARRAS AGRUPADAS COMPARATIVA COMPLETA
+# FIGURA 5 — BARRAS AGRUPADAS COMPARATIVA COMPLETA
 # =============================================================
 
 fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-fig.suptitle('Comparativa completa — MAE $P_{bat}$ y MAE SOC',
+fig.suptitle('Comparativa completa - MAE P_bat y MAE SOC',
              fontsize=13, fontweight='bold')
 
 x      = np.arange(len(HORIZONTES))
 ancho  = 0.18
-offset = np.linspace(-(len(MODELOS)-1)/2, (len(MODELOS)-1)/2,
-                     len(MODELOS)) * ancho
+offset = np.linspace(-(len(MODELOS)-1)/2,
+                      (len(MODELOS)-1)/2, len(MODELOS)) * ancho
 
-for k, ax, (matriz, ylabel) in enumerate(zip(
-        axes, [(mat_mae_acc, 'MAE $P_{bat}$ (MW)'),
-               (mat_mae_soc, 'MAE SOC (p.u.)')])):
+for ax, (matriz, ylabel) in zip(axes,
+    [(mat_mae_acc, 'MAE P_bat (MW)'),
+     (mat_mae_soc, 'MAE SOC (p.u.)')]):
     for j, modelo in enumerate(MODELOS):
         vals = matriz[:, j]
         mask = ~np.isnan(vals)
         ax.bar(x[mask] + offset[j], vals[mask],
                width=ancho, label=modelo,
-               color=COLORES_MOD[modelo], alpha=0.85,
-               edgecolor='white')
-    ax.set_xticks(x)
-    ax.set_xticklabels(HORIZONTES, fontsize=10)
-    ax.set_ylabel(ylabel)
-    ax.set_xlabel('Horizonte temporal')
-    ax.legend(fontsize=9)
-    ax.grid(True, alpha=0.3, axis='y')
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
+               color=COLORES_MOD[modelo], alpha=0.85, edgecolor='white')
+    ax.set_xticks(x); ax.set_xticklabels(HORIZONTES, fontsize=10)
+    ax.set_ylabel(ylabel); ax.set_xlabel('Horizonte temporal')
+    ax.legend(fontsize=9); ax.grid(True, alpha=0.3, axis='y')
+    ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False)
 
 plt.tight_layout()
-ruta = os.path.join(DIR, 'barras_comparativa_completa.png')
-plt.savefig(ruta, dpi=150, bbox_inches='tight')
+plt.savefig(os.path.join(DIR, 'barras_comparativa_completa.png'),
+            dpi=150, bbox_inches='tight')
 plt.close()
-print(f"  Guardada: barras_comparativa_completa.png")
+print("  Guardada: barras_comparativa_completa.png")
 
 # =============================================================
-# FIGURA 5 — MAE POR HORA PARA TODOS LOS HORIZONTES
-#            (usando el mejor modelo de cada horizonte)
+# FIGURA 6 — MAE POR HORA PARA TODOS LOS HORIZONTES
 # =============================================================
 
 fig, axes = plt.subplots(2, 2, figsize=(14, 9))
-fig.suptitle('MAE $P_{bat}$ por hora del día — comparativa de horizontes',
+fig.suptitle('MAE P_bat por hora del dia - comparativa de horizontes',
              fontsize=13, fontweight='bold')
 
 for idx, horizonte in enumerate(HORIZONTES):
     ax = axes[idx // 2][idx % 2]
     if not datos[horizonte]:
-        ax.set_title(f'{horizonte} — sin datos')
-        continue
+        ax.set_title(f'{horizonte} - sin datos'); continue
 
     for modelo, df in datos[horizonte].items():
-        mae_hora = []
-        for h in range(T):
-            df_h  = df[df['HORA'] == h]
-            if len(df_h) == 0:
-                mae_hora.append(np.nan)
-            else:
-                err_h = (df_h['ACCION_REAL'] - df_h['ACCION_IA']).abs().mean()
-                mae_hora.append(err_h)
-        ax.plot(range(T), mae_hora,
-                label=modelo, color=COLORES_MOD[modelo],
-                marker=MARCADORES[modelo], linewidth=1.5,
-                markersize=4)
+        mae_hora = [(df[df['HORA']==h]['ACCION_REAL']
+                     - df[df['HORA']==h]['ACCION_IA']).abs().mean()
+                    for h in range(T)]
+        ax.plot(range(T), mae_hora, label=modelo,
+                color=COLORES_MOD[modelo], marker=MARCADORES[modelo],
+                linewidth=1.5, markersize=4)
 
     ax.axvspan(7, 9,   alpha=0.08, color='gray')
     ax.axvspan(18, 21, alpha=0.08, color='gray')
     ax.set_title(f'Horizonte {horizonte}')
-    ax.set_xlabel('Hora del día')
-    ax.set_ylabel('MAE $P_{bat}$ (MW)')
+    ax.set_xlabel('Hora del dia'); ax.set_ylabel('MAE P_bat (MW)')
     ax.set_xticks(range(0, T, 2))
-    ax.legend(fontsize=8)
-    ax.grid(True, alpha=0.3)
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
+    ax.legend(fontsize=8); ax.grid(True, alpha=0.3)
+    ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False)
 
 plt.tight_layout()
-ruta = os.path.join(DIR, 'error_hora_todos_horizontes.png')
-plt.savefig(ruta, dpi=150, bbox_inches='tight')
+plt.savefig(os.path.join(DIR, 'error_hora_todos_horizontes.png'),
+            dpi=150, bbox_inches='tight')
 plt.close()
-print(f"  Guardada: error_hora_todos_horizontes.png")
+print("  Guardada: error_hora_todos_horizontes.png")
+
+# =============================================================
+# FIGURA 7 — TABLA VISUAL (imagen PNG de la tabla resumen)
+# =============================================================
+
+fig, ax = plt.subplots(figsize=(14, 5))
+ax.axis('off')
+
+cols = ['Horizonte', 'Modelo', 'MAE P_bat\n(MW)', 'RMSE P_bat\n(MW)',
+        'MAE SOC\n(p.u.)', 'RMSE SOC\n(p.u.)',
+        'nMAE P_bat\n(%rango)', 'nMAE SOC\n(%rango)']
+
+filas_tabla = []
+for i, h in enumerate(HORIZONTES):
+    for j, m in enumerate(MODELOS):
+        if np.isnan(mat_mae_acc[i, j]):
+            continue
+        filas_tabla.append([
+            h, m,
+            f"{mat_mae_acc[i,j]:.4f}",
+            f"{mat_rmse_acc[i,j]:.4f}",
+            f"{mat_mae_soc[i,j]:.4f}",
+            f"{mat_rmse_soc[i,j]:.4f}",
+            f"{mat_nmae_acc[i,j]:.2f}%",
+            f"{mat_nmae_soc[i,j]:.2f}%",
+        ])
+
+tabla = ax.table(cellText=filas_tabla, colLabels=cols,
+                 loc='center', cellLoc='center')
+tabla.auto_set_font_size(False)
+tabla.set_fontsize(8)
+tabla.scale(1.1, 1.6)
+
+# Cabecera
+for j in range(len(cols)):
+    tabla[0, j].set_facecolor('#2C3E50')
+    tabla[0, j].set_text_props(color='white', fontweight='bold')
+
+# Colorear por horizonte
+color_fila = {'T=1h': '#FADBD8', 'T=2h': '#FAE5D3',
+              'T=4h': '#D5F5E3', 'T=24h': '#D6EAF8'}
+for k, (h, *_) in enumerate(filas_tabla):
+    for j in range(len(cols)):
+        tabla[k+1, j].set_facecolor(color_fila.get(h, 'white'))
+
+# Marcar minimo de cada columna metrica en negrita
+for col_idx in range(2, len(cols)):
+    vals = []
+    for k, fila in enumerate(filas_tabla):
+        try:
+            vals.append((float(fila[col_idx].replace('%','')), k))
+        except:
+            vals.append((float('inf'), k))
+    if vals:
+        min_k = min(vals, key=lambda x: x[0])[1]
+        tabla[min_k+1, col_idx].set_text_props(fontweight='bold', color='darkgreen')
+
+ax.set_title('Tabla resumen — todas las combinaciones horizonte x modelo',
+             fontsize=12, fontweight='bold', pad=20)
+plt.tight_layout()
+plt.savefig(os.path.join(DIR, 'tabla_comparativa_visual.png'),
+            dpi=150, bbox_inches='tight')
+plt.close()
+print("  Guardada: tabla_comparativa_visual.png")
 
 # =============================================================
 # RESUMEN FINAL
 # =============================================================
 
 print("\n" + "="*65)
-print("  COMPARATIVA CRUZADA HORIZONTES x MODELOS COMPLETADA")
+print("  COMPARATIVA CRUZADA COMPLETADA")
 print("="*65)
-print("  Figuras generadas (en la carpeta T=24h):")
-print("    1) matriz_MAE_Pbat.png")
-print("    2) matriz_MAE_SOC.png")
-print("    3) efecto_horizonte_MAE.png")
-print("    4) efecto_horizonte_RMSE.png")
-if len(costes_por_horizonte) >= 2:
-    print("    5) boxplot_coste_horizontes.png")
-print("    6) barras_comparativa_completa.png")
-print("    7) error_hora_todos_horizontes.png")
-print()
-
-# Mejor combinacion global
 if not np.all(np.isnan(mat_mae_acc)):
     idx_min = np.unravel_index(np.nanargmin(mat_mae_acc), mat_mae_acc.shape)
-    print(f"  MEJOR COMBINACION (menor MAE P_bat):")
+    print(f"\n  MEJOR COMBINACION (menor MAE P_bat):")
     print(f"    Horizonte : {HORIZONTES[idx_min[0]]}")
     print(f"    Modelo    : {MODELOS[idx_min[1]]}")
     print(f"    MAE P_bat : {mat_mae_acc[idx_min]:.4f} MW")
     print(f"    MAE SOC   : {mat_mae_soc[idx_min]:.4f} p.u.")
+    print(f"    nMAE      : {mat_nmae_acc[idx_min]:.2f}%")
+print("\n  Figuras en: COMPARATIVAS/")
+for i, f in enumerate([
+    'matriz_MAE_Pbat.png', 'matriz_MAE_SOC.png', 'matriz_nMAE_Pbat.png',
+    'efecto_horizonte_MAE.png', 'efecto_horizonte_RMSE.png', 'efecto_horizonte_nMAE.png',
+    'barras_comparativa_completa.png', 'error_hora_todos_horizontes.png',
+    'tabla_comparativa_visual.png'], 1):
+    print(f"    {i}) {f}")
 print("="*65)
